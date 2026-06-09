@@ -61,14 +61,22 @@ def make_maggie_embed(title: str, description: str):
 
 def handle_api_error(e: Exception) -> discord.Embed:
     err_msg = str(e)
-    if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "quota" in err_msg.lower():
+    # this will print the exact raw error details inside your railway deployment logs
+    print(f"🚨 SYSTEM EXCEPTION CAUGHT: Type={type(e).__name__} | Message={err_msg}")
+    
+    # isolated logic: only trigger quota messages if it is a verified google resource limit
+    if "RESOURCE_EXHAUSTED" in err_msg or ("429" in err_msg and "discord" not in type(e).__name__.lower() and "httpexception" not in err_msg.lower()):
         return make_maggie_embed(
             "🚨 COSMIC QUOTA EXHAUSTED", 
             "omg bestie, the celestial mainframe is completely out of matcha fluid! the daily api generation limits have been hit. please wait a few minutes for the frequencies to cool down! 🍵💀"
         )
-    return make_maggie_embed("🚨 OPERATIONAL ENGINE CRASH", f"the processing core encountered an exception error:\n```text\n{err_msg}\n```")
+    
+    # if it's a discord issue or a code flaw, it reveals the true error text clearly
+    return make_maggie_embed(
+        "🚨 OPERATIONAL ENGINE CRASH", 
+        f"the processing core encountered a system exception:\n```text\n[{type(e).__name__}] {err_msg}\n```"
+    )
 
-# relaxed safety layer to ensure informational requests don't get blocked by aggressive filters
 relaxed_safety = [
     types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
     types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
@@ -289,7 +297,7 @@ async def update_cmd(interaction: discord.Interaction):
         "🚀 BROADCAST COMPLETE", 
         f"slay! patch files read successfully. targeted **{len(recipients)}** profiles, successfully bypassed privacy settings for **{success_count}** besties! 💖"
     )
-    await interaction.followup.send(embed=summary_embed)
+    await interaction.followup.send(summary_embed)
 
 # --- 🖼️ GRAPHICS AND AUDIO MEDIA OPERATIONS ---
 
@@ -411,7 +419,6 @@ async def erm_actually_cmd(interaction: discord.Interaction, source: app_command
         allowed, r, warning = check_allowance(interaction.user.id)
         if not allowed: return
         try:
-            # polished prompt guidelines to return high-utility, accurate breakdowns balancing style and substance
             system_instruction = (
                 "You are an incredibly precise, informative, yet playfully preppy fact-checker. Provide highly accurate, "
                 "scannable, and informative breakdowns of the truth regarding the user's query. Use clear markdown formatting, "
@@ -422,7 +429,11 @@ async def erm_actually_cmd(interaction: discord.Interaction, source: app_command
                 contents=query, 
                 config=types.GenerateContentConfig(system_instruction=system_instruction, max_output_tokens=900, safety_settings=relaxed_safety)
             )
-            embed = make_maggie_embed("✨ 🤓 Erm, actually...", res.text)
+            output_text = res.text
+            # safety length truncation guard avoids triggering discord's character length crashes
+            if len(output_text) > 4000:
+                output_text = output_text[:3995] + "\n..."
+            embed = make_maggie_embed("✨ 🤓 Erm, actually...", output_text)
         except Exception as e: 
             embed = handle_api_error(e)
             
@@ -463,7 +474,10 @@ async def erm_actually_cmd(interaction: discord.Interaction, source: app_command
                 contents=query, 
                 config=types.GenerateContentConfig(system_instruction="Provide a highly useful dictionary style breakdown defining popular cultural or internet slang phrases. Keep it fun and stylish.", max_output_tokens=800, safety_settings=relaxed_safety)
             )
-            embed = make_maggie_embed("✨ 🔮 Urban Dictionary: Maggie Edition 💅", res.text)
+            output_text = res.text
+            if len(output_text) > 4000:
+                output_text = output_text[:3995] + "\n..."
+            embed = make_maggie_embed("✨ 🔮 Urban Dictionary: Maggie Edition 💅", output_text)
         except Exception as e: 
             embed = handle_api_error(e)
             
@@ -549,7 +563,6 @@ async def ai_cmd(interaction: discord.Interaction, prompt: str):
         
     await interaction.response.defer()
     
-    # upgraded core prompt layout parameters to deliver clear structure and genuine technical utility instead of pure gimmicks
     maggie_persona = (
         "You are 'Magical Maggie', an elite cosmic assistant intelligence core. You are hyper-preppy, highly supportive, "
         "and structured. You are a strict organic vegan obsessed with premium wellness, iced matcha formulas, and precise nutrition. "
@@ -565,7 +578,11 @@ async def ai_cmd(interaction: discord.Interaction, prompt: str):
             contents=prompt,
             config=types.GenerateContentConfig(system_instruction=maggie_persona, max_output_tokens=900, safety_settings=relaxed_safety)
         )
-        embed = make_maggie_embed("🔮 MAGICAL MAGGIE MAIN ENGINE VIBE ✨", res.text)
+        output_text = res.text
+        if len(output_text) > 4000:
+            output_text = output_text[:3995] + "\n..."
+            
+        embed = make_maggie_embed("🔮 MAGICAL MAGGIE MAIN ENGINE VIBE ✨", output_text)
         if warning: 
             embed.set_footer(text=warning)
         else:
