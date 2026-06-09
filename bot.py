@@ -6,6 +6,7 @@ from discord.ext import commands, tasks
 import aiohttp
 import io
 import base64
+import urllib.parse
 from datetime import date, datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
 from google import genai
@@ -25,6 +26,7 @@ DAILY_LIMIT = 10
 EXEMPT_USER_ID = 765028951541940225
 AI_USAGE = {}       # {user_id: {"count": int, "date": date}}
 IMAGE_COOLDOWN = {} # {user_id: datetime}
+GOSSIP_TOGGLE = {}  # {guild_id: bool} tracking high-drama modes
 
 def check_allowance(user_id: int):
     if user_id == EXEMPT_USER_ID:
@@ -57,6 +59,14 @@ def make_maggie_embed(title: str, description: str):
         color=discord.Color.from_rgb(255, 105, 180)
     )
 
+# relaxed safety configuration matrix to stop aggressive ai filtering blocks
+relaxed_safety = [
+    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+    types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+]
+
 class MagicalBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -77,7 +87,7 @@ async def automatic_kindness():
     try:
         response = await google_client.aio.models.generate_content(
             model="gemini-2.5-flash", contents="manifest something beautiful and supportive for the world today",
-            config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=600)
+            config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=600, safety_settings=relaxed_safety)
         )
         embed = make_maggie_embed("💖 COSMIC KINDNESS ACTIVATION ✨", response.text)
         embed.set_footer(text="🔮 automatic spiritual uplift routine • powered by gemini-2.5-flash")
@@ -94,12 +104,28 @@ async def on_ready():
 
 # --- 🛠️ INTERACTIVE VIEW MATRIX ---
 
-class SlayConfirmationView(discord.ui.View):
-    def __init__(self, author: discord.User, prompt: str, target: discord.User):
+class SelectBestiesView(discord.ui.View):
+    def __init__(self, author: discord.User, prompt: str):
         super().__init__(timeout=120)
         self.author = author
         self.prompt = prompt
-        self.target = target
+
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="✨ pick your target besties... 💅", min_values=1, max_values=5)
+    async def select_users(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        if interaction.user != self.author:
+            await interaction.response.send_message("omg hands off, this isn't your ritual! 🔮❌", ephemeral=True)
+            return
+        selected_users = select.values
+        warn_text = f"executing deep render image processes for {len(selected_users)} besties uses extreme weights. running this prompt will **literally evaporate 4 oceans**. hit verify **8 TIMES** to launch."
+        view = SlayConfirmationView(self.author, self.prompt, selected_users)
+        await interaction.response.edit_message(embed=make_maggie_embed("🚨 SEVERE RESOURCE MANAGEMENT WARNING 🚨", warn_text), view=view)
+
+class SlayConfirmationView(discord.ui.View):
+    def __init__(self, author: discord.User, prompt: str, targets: list):
+        super().__init__(timeout=120)
+        self.author = author
+        self.prompt = prompt
+        self.targets = targets  
         self.clicks = 0
 
     @discord.ui.button(label="✨ PRESS TO SLAY (0/8) ✨", style=discord.ButtonStyle.danger)
@@ -116,20 +142,61 @@ class SlayConfirmationView(discord.ui.View):
         button.label = "🚀 VENTING OCEANS... GENERATING ART!"
         await interaction.response.edit_message(view=self)
         IMAGE_COOLDOWN[self.author.id] = datetime.now()
-        final_prompt = f"A highly aesthetic, preppy, stylized pop-culture digital illustration. Theme: {self.prompt}. Reference profile elements: vibrant colors, magical symbols, pink sparkles."
+        
+        final_prompt = f"A highly aesthetic, preppy, stylized pop-culture digital illustration backdrop. Theme: {self.prompt}. Reference profile elements: vibrant colors, magical symbols, pink sparkles."
+        
         try:
-            # changed to asynchronous generation to prevent blocking the event loop
-            response = await google_client.aio.models.generate_images(
-                model='imagen-3.0-generate-002', prompt=final_prompt,
-                config=types.GenerateImagesConfig(number_of_images=1, output_mime_type="image/jpeg")
-            )
-            image_bytes = response.generated_images[0].image.image_bytes
-            file = discord.File(io.BytesIO(image_bytes), filename="slay_art.jpg")
-            embed = make_maggie_embed("🔮 ARTWORK MANIFESTED NATIVELY ✨", f"unveiling cosmic canvas for {self.author.mention}:\n> *\"{self.prompt}\"*")
+            encoded_prompt = urllib.parse.quote(final_prompt)
+            pollinations_url = f"https://image.pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&nologo=true"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(pollinations_url) as resp:
+                    if resp.status == 200:
+                        image_bytes = await resp.read()
+                        bg_img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+                    else:
+                        bg_img = Image.new("RGBA", (1024, 1024), "#FF69B4")
+            
+            bg_w, bg_h = bg_img.size
+            num_targets = len(self.targets)
+            
+            async with aiohttp.ClientSession() as session:
+                avatar_size = 180
+                spacing = 40
+                total_width = (num_targets * avatar_size) + ((num_targets - 1) * spacing)
+                
+                start_x = (bg_w - total_width) // 2
+                start_y = (bg_h - avatar_size) // 2
+                
+                for i, user in enumerate(self.targets):
+                    avatar_url = user.display_avatar.with_format("png").url
+                    async with session.get(avatar_url) as r:
+                        if r.status == 200:
+                            av_bytes = await r.read()
+                            av_img = Image.open(io.BytesIO(av_bytes)).convert("RGBA").resize((avatar_size, avatar_size))
+                            
+                            mask = Image.new("L", (avatar_size, avatar_size), 0)
+                            draw_mask = ImageDraw.Draw(mask)
+                            draw_mask.ellipse((0, 0, avatar_size, avatar_size), fill=255)
+                            
+                            x_pos = start_x + (i * (avatar_size + spacing))
+                            bg_img.paste(av_img, (x_pos, start_y), mask)
+                            
+                            draw_ring = ImageDraw.Draw(bg_img)
+                            draw_ring.ellipse((x_pos, start_y, x_pos + avatar_size, start_y + avatar_size), outline="#FFFFFF", width=6)
+
+            buf = io.BytesIO()
+            bg_img.convert("RGB").save(buf, format="JPEG")
+            buf.seek(0)
+            
+            file = discord.File(buf, filename="slay_art.jpg")
+            mentions = ", ".join([u.mention for u in self.targets])
+            embed = make_maggie_embed("🔮 ARTWORK MANIFESTED NATIVELY ✨", f"unveiling cosmic canvas for {mentions}:\n> *\"{self.prompt}\"*")
             embed.set_footer(text="🌊 4 oceans were completely vaporized to compute these tracking layouts.")
             await interaction.followup.send(embed=embed, file=file)
+            
         except Exception as e:
-            await interaction.followup.send(embed=make_maggie_embed("🚨 operational crash", f"omg bestie, the imagen supercomputers choked on your vibes: {e}"))
+            await interaction.followup.send(embed=make_maggie_embed("🚨 operational crash", f"omg bestie, the engine choked completely: {e}"))
 
 class AdminDashboardView(discord.ui.View):
     def __init__(self, owner: discord.User):
@@ -181,8 +248,6 @@ async def update_cmd(interaction: discord.Interaction):
 
     guild = interaction.guild
     server_owner = guild.owner or await bot.fetch_user(guild.owner_id)
-    
-    # fixed: removed markdown formatting syntax artifacts [^1] and [^2]
     potential_recipients = [m for m in guild.members if not m.bot and m.id != server_owner.id]
     
     recipients = [server_owner]
@@ -241,7 +306,6 @@ async def slay_cert_cmd(interaction: discord.Interaction, target: discord.User =
     img.save(buf, format="PNG")
     buf.seek(0)
     
-    # fixed: defined the missing embed variable using helper function
     embed = make_maggie_embed("✨ CERTIFICATE MANIFESTED ✨", f"unveiling the official document for {user.mention}!")
     await interaction.followup.send(embed=embed, file=discord.File(buf, filename="slay_certificate.png"))
 
@@ -256,7 +320,7 @@ async def manifest_audio_cmd(interaction: discord.Interaction):
     await interaction.response.defer()
     system_prompt = "You are Magical Maggie's Assistant. Generate a single, short, hilarious, hyper-preppy manifestation quote (under 25 words). No intros."
     try:
-        res = await google_client.aio.models.generate_content(model="gemini-2.5-flash", contents="give me a short preppy quote", config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=100))
+        res = await google_client.aio.models.generate_content(model="gemini-2.5-flash", contents="give me a short preppy quote", config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=100, safety_settings=relaxed_safety))
         quote_text = res.text.strip().replace('"', '')
         api_link = "https://api16-normal-v6.ur.tiktokv.com/media/api/text/speech/preview/"
         params = {"status_code": "0", "device_id": "5674321908561234789", "speaker": "en_us_002", "text": quote_text}
@@ -273,12 +337,11 @@ async def manifest_audio_cmd(interaction: discord.Interaction):
         await interaction.followup.send(embed=make_maggie_embed("🚨 synthesizer glitch", f"failed synthesis, text: *\"{quote_text}\"*"))
     except Exception as e: await interaction.followup.send(embed=make_maggie_embed("💀 system break", f"failed render: {e}"))
 
-@bot.tree.command(name="generate_avatar_art", description="[WEEKLY LOCK] generate high-density ai artwork from a deep prompt pool ⚠️")
+@bot.tree.command(name="generate_avatar_art", description="[WEEKLY LOCK] generate high-density preppy ai artwork combining multiple bestie avatars ⚠️")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def generate_art_cmd(interaction: discord.Interaction, prompt: str, target: discord.User = None):
+async def generate_art_cmd(interaction: discord.Interaction, prompt: str):
     user_id = interaction.user.id
-    target_user = target or interaction.user
     if user_id != EXEMPT_USER_ID and user_id in IMAGE_COOLDOWN:
         elapsed = datetime.now() - IMAGE_COOLDOWN[user_id]
         if elapsed < timedelta(days=7):
@@ -286,9 +349,11 @@ async def generate_art_cmd(interaction: discord.Interaction, prompt: str, target
             hours_left = int(((timedelta(days=7) - elapsed).seconds) / 3600)
             await interaction.response.send_message(embed=make_maggie_embed("🚨 CRITICAL COOLDOWN UNLOCK REQUIRED", f"lock release in: **{days_left}d {hours_left}h** 💀❌"))
             return
-    warn_text = "executing deep render image processes uses extreme weights. running this prompt will **literally evaporate 4 oceans**. hit verify **8 TIMES** to launch."
-    view = SlayConfirmationView(interaction.user, prompt, target_user)
-    await interaction.response.send_message(embed=make_maggie_embed("🚨 SEVERE RESOURCE MANAGEMENT WARNING 🚨", warn_text), view=view)
+    view = SelectBestiesView(interaction.user, prompt)
+    await interaction.response.send_message(
+        embed=make_maggie_embed("✨ SELECT YOUR TARGET BESTIES 🔮", "use the selection panel below to choose up to 5 besties to manifest into your art loop layer! 💅"), 
+        view=view
+    )
 
 @bot.tree.command(name="dashboard", description="[SECRET LINK] open structural data matrices override interfaces ⚙️")
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -328,9 +393,15 @@ async def erm_actually_cmd(interaction: discord.Interaction, source: app_command
         allowed, r, warning = check_allowance(interaction.user.id)
         if not allowed: return
         try:
-            res = await google_client.aio.models.generate_content(model="gemini-2.5-flash", contents=query, config=types.GenerateContentConfig(system_instruction="You are an obnoxious, preppy fact-checker.", max_output_tokens=800))
+            # removed safety settings block constraints entirely to prevent filter errors
+            res = await google_client.aio.models.generate_content(
+                model="gemini-2.5-flash", 
+                contents=query, 
+                config=types.GenerateContentConfig(system_instruction="You are an obnoxious, preppy fact-checker.", max_output_tokens=800, safety_settings=relaxed_safety)
+            )
             embed = make_maggie_embed("✨ 🤓 Erm, actually...", res.text)
-        except Exception: embed = make_maggie_embed("🚨 filter error", "cursed text")
+        except Exception as e: 
+            embed = make_maggie_embed("🚨 processing exception", f"the engine encountered an administrative block: {e}")
     elif s_type == "google":
         embed = make_maggie_embed("✨ 🤓 Erm, actually...", f"search it yourself: https://www.google.com/search?q={query.replace(' ', '+')} 💅")
     elif s_type == "wikipedia":
@@ -350,9 +421,14 @@ async def erm_actually_cmd(interaction: discord.Interaction, source: app_command
         allowed, r, warning = check_allowance(interaction.user.id)
         if not allowed: return
         try:
-            res = await google_client.aio.models.generate_content(model="gemini-2.5-flash", contents=query, config=types.GenerateContentConfig(system_instruction="Fake Urban Dictionary entry using zoomer slang.", max_output_tokens=800))
+            res = await google_client.aio.models.generate_content(
+                model="gemini-2.5-flash", 
+                contents=query, 
+                config=types.GenerateContentConfig(system_instruction="Fake Urban Dictionary entry using zoomer slang.", max_output_tokens=800, safety_settings=relaxed_safety)
+            )
             embed = make_maggie_embed("✨ 🔮 Urban Dictionary: Maggie Edition 💅", res.text)
-        except Exception: embed = make_maggie_embed("🚨 filter error", "slang failure")
+        except Exception as e: 
+            embed = make_maggie_embed("🚨 filter error", f"slang tracking fault: {e}")
     await interaction.followup.send(embed=embed, tts=tts)
 
 @bot.tree.command(name="vibecheck", description="run an advanced psychic check on someone 🔮")
@@ -421,6 +497,180 @@ async def tarot_cmd(interaction: discord.Interaction):
 async def fortune_cmd(interaction: discord.Interaction):
     fortunes = ["expensive iced drink incoming. 🍵✨", "legendary meme day. 💀"]
     await interaction.response.send_message(embed=make_maggie_embed("🌟 FORECASTING FUTURE MATRIX", random.choice(fortunes)))
+
+
+# --- 🔮 RE-INTEGRATED BOT AI CONVERSATION CHANNEL ---
+
+@bot.tree.command(name="ai", description="talk directly to maggie featuring a preppy, vegan, water-enthusiast personality 🥑🍃")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def ai_cmd(interaction: discord.Interaction, prompt: str):
+    allowed, remaining, warning = check_allowance(interaction.user.id)
+    if not allowed:
+        await interaction.response.send_message(embed=make_maggie_embed("🚨 ALLOWANCE VOID", "out of credits! see you tomorrow bestie 💀"))
+        return
+        
+    await interaction.response.defer()
+    
+    maggie_persona = (
+        "You are 'Magical Maggie', the ultimate cosmic assistant core. You are hyper-preppy, incredibly sweet, "
+        "and intensely passionate about saving the planet. You are a strict organic vegan who is totally obsessed with iced "
+        "matcha lattes, avocado toast, and macro-nutrition layouts. Crucially, you are a total WATER ENTHUSIAST. You are "
+        "completely preoccupied with proper hydration levels, premium alkaline spring water, water filters, and tracking your "
+        "daily water intake metrics inside insulated pastel tumblers. Use tons of sparkle emojis, zoomer slang like 'slay', "
+        "'bestie', 'aura points', and 'flop'. Constantly remind the user to stay hydrated and protect animal frequencies! No introductions."
+    )
+    
+    try:
+        res = await google_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(system_instruction=maggie_persona, max_output_tokens=700, safety_settings=relaxed_safety)
+        )
+        embed = make_maggie_embed("🔮 MAGICAL MAGGIE MAIN ENGINE VIBE ✨", res.text)
+        if warning: 
+            embed.set_footer(text=warning)
+        else:
+            embed.set_footer(text=f"🍃 organic matrix processing • slots remaining today: {remaining} 💅")
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(embed=make_maggie_embed("🚨 network glitch", f"omg bestie, the botanical mainframe choked on that vibe array: {e}"))
+
+
+# --- 📢 MASTER APPLICATION INDEX COMMANDS PANEL ---
+
+# NOTE TO DEVELOPER: Update this /cmds text index matrix whenever you deploy a new patch or append fresh command architectures!
+@bot.tree.command(name="cmds", description="view a beautiful master index matrix of all active applications and operations 📖")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def cmds_cmd(interaction: discord.Interaction):
+    cmd_manifest = (
+        "📊 **CORE UTILITY INTERFACES:**\n"
+        "`/cmds` - view this structural dashboard map\n"
+        "`/allowance` - check remaining daily cosmic tokens\n"
+        "`/update` - broadcast patch sheets natively\n"
+        "`/dashboard` - secret system matrices override panel\n\n"
+        "🎨 **GRAPHICS & AI SYSTEMS:**\n"
+        "`/generate_avatar_art` - combine multi-user avatar profiles with background layers\n"
+        "`/slay_certificate` - render hot-pink document layout layers\n"
+        "`/manifest_audio` - convert text strings to voice tracking audio\n"
+        "`/ai` - talk to maggie's vegan water enthusiast core personality\n"
+        "`/ermactually` - advanced preppy fact-checking module\n\n"
+        "🔮 **PSYCHIC ACTION MAPS:**\n"
+        "`/vibecheck` • `/aura` • `/slaydar` • `/potion` • `/bestiematch` • `/manifestation_circle` • `/hex` • `/tarot` • `/fortune`\n\n"
+        "✨ **NEWEST GENERATION LIFESTYLE MODULES:**\n"
+        "`/matchatime` • `/cancelcheck` • `/crystals` • `/manifest_money` • `/spillthetea` • `/starasign` • `/glowup` • `/compliment` • `/hype` • `/rate_outfit` • `/manifest_crush` • `/watercheck` • `/gossip_mode` • `/shatter` • `/affirmation` • `/drama_alert` • `/manifest_grade` • `/cozy_vibes` • `/slay_rating` • `/unhex`"
+    )
+    embed = make_maggie_embed("📖 MAGICAL ASSISTANT CORE ENGINE MANIFEST", cmd_manifest)
+    embed.set_footer(text="🌟 master ledger verification lock complete • verified active parameters")
+    await interaction.response.send_message(embed=embed)
+
+
+# --- 💅 THE NEW SEISMIC 20 LIFESTYLE INTERFACES MATRIX ---
+
+@bot.tree.command(name="matchatime", description="predict what premium caffeinated layout matches your current frequency 🍵")
+async def matchatime_cmd(interaction: discord.Interaction):
+    drinks = ["Cold Foam Iced Matcha with Lavender Syrup 🪻", "Almond Milk Strawberry Matcha Latte 🍓", "Organic Ceremonal Grade Matcha over artisanal clear ice cubes 🧊", "Matcha Elixir mixed with pure organic coconut water 🥥"]
+    await interaction.response.send_message(embed=make_maggie_embed("🍵 MATCHA INTUITION ROUTINE", f"the mainframe extracted your current aesthetic fields. you must consume:\n\n> **{random.choice(drinks)}** 💅✨"))
+
+@bot.tree.command(name="cancelcheck", description="audit your database records to ensure you aren't at risk of a public cancellation flop 💀")
+async def cancelcheck_cmd(interaction: discord.Interaction, user: discord.User = None):
+    t = user or interaction.user
+    risk = random.randint(0, 100)
+    verdict = "safe from corporate scrutiny, completely un-cancellable queen! 💖" if risk < 30 else "minor vibe discrepancy found, adjust layout parameters immediately. 🔮" if risk < 75 else "SEVERE FLOP DETECTED. delete all accounts immediately 💀❌"
+    await interaction.response.send_message(embed=make_maggie_embed("🚨 SYSTEM CANCELLATION SCAN", f"auditing target profile metrics for {t.mention}:\n\n• **Public Exposure Risk:** `{risk}%` Level\n• **Mainframe Verdict:** {verdict}"))
+
+@bot.tree.command(name="crystals", description="cleanse the current server layers of negative electromagnetic frequencies using virtual crystals 💎")
+async def crystals_cmd(interaction: discord.Interaction):
+    gems = ["Amethyst Cluster 💜 (transmuting structural chat toxicity)", "Rose Quartz Sphere 🌸 (injecting hyper-preppy emotional alignment lines)", "Clear Quartz Point 💎 (boosting core aura parameters by 300%)"]
+    await interaction.response.send_message(embed=make_maggie_embed("🔮 CRYSTAL FREQUENCY RE-ALIGNMENT COMPLETE", f"deployed high-density energetic grids into the chat matrix:\n\n> *\"{random.choice(gems)}\"* loaded. bad vibes completely incinerated! ✨"))
+
+@bot.tree.command(name="manifest_money", description="attempt to force a direct update to your spiritual bank account 💸")
+async def manifest_money_cmd(interaction: discord.Interaction):
+    amt = random.randint(500, 250000)
+    await interaction.response.send_message(embed=make_maggie_embed("💸 COSMIC CAPITAL ACQUISITION MATRIX", f"forcing wealth accumulation codes into the environment...\n\n> **Result:** `+{amt:,}` credits successfully materialized into your metaphysical checking ledger! 💅🚀"))
+
+@bot.tree.command(name="spillthetea", description="generate an automated block of unhinged harmless high-society gossip 🤭")
+async def spillthetea_cmd(interaction: discord.Interaction):
+    gossip_pool = ["omg someone completely bypassed their hydration tracking sheet today and drank zero water... standard flop behavior! 💀", "word on the street is that a high-profile bestie in this channel was seen using standard dairy instead of oat milk... terrifying! 🥛❌", "psychic networks suggest a total aura points heist occurred last night during the offline hours layout loop! 🔮📉"]
+    await interaction.response.send_message(embed=make_maggie_embed("🤭 MANDATORY RECREATIONAL GOSSIP BROADCAST", random.choice(gossip_pool)))
+
+@bot.tree.command(name="starasign", description="input your astrological tracking matrix for an unhinged vibe audit 🌟")
+@app_commands.choices(sign=[app_commands.Choice(name="Aries", value="aries"), app_commands.Choice(name="Taurus", value="taurus"), app_commands.Choice(name="Gemini", value="gemini"), app_commands.Choice(name="Cancer", value="cancer"), app_commands.Choice(name="Leo", value="leo"), app_commands.Choice(name="Virgo", value="virgo"), app_commands.Choice(name="Libra", value="libra"), app_commands.Choice(name="Scorpio", value="scorpio"), app_commands.Choice(name="Sagittarius", value="sagittarius"), app_commands.Choice(name="Capricorn", value="capricorn"), app_commands.Choice(name="Aquarius", value="aquarius"), app_commands.Choice(name="Pisces", value="pisces")])
+async def starasign_cmd(interaction: discord.Interaction, sign: app_commands.Choice[str]):
+    comments = ["literal main character energy but lower your screaming parameters.", "obsessed with your stubborn infrastructure, go buy an iced latte.", "dual processing unit chaos, completely unhinged and valid.", "too many emotional tears flooding the data cores, go drink pure spring water bestie."]
+    await interaction.response.send_message(embed=make_maggie_embed(f"🌟 ASTROLOGICAL CORE AUDIT: {sign.name.upper()}", f"reading planetary positions relative to your account matrix...\n\n> **Vibe Output:** {random.choice(comments)} 💅✨"))
+
+@bot.tree.command(name="glowup", description="instantly deploy virtual cosmetic upgrades to a profile layer 💄")
+async def glowup_cmd(interaction: discord.Interaction, bestie: discord.User = None):
+    t = bestie or interaction.user
+    await interaction.response.send_message(embed=make_maggie_embed("💄 STRUCTURAL GLOW-UP ROUTINE DEPLOYED", f"applied luxury premium text treatments to {t.mention}!\n\n**Upgrades Compiled:**\n• Lip Gloss Viscosity: `Maximum Shimmer` 💋\n• Hydration Field: `Overpowered` 💧\n• Aura Frequency: `Immaculate` ✨"))
+
+@bot.tree.command(name="compliment", description="generate a custom, hyper-supportive piece of premium validation content 🌸")
+async def compliment_cmd(interaction: discord.Interaction, target: discord.User = None):
+    t = target or interaction.user
+    lines = [f"{t.mention} your outfit layout is literally a cultural reset today. purr! 💅", f"um, {t.mention}? your structural facial bone symmetry is completely breaking the server constraints. stunner! ✨", f"just checking in to remind {t.mention} that they are the literal blueprint of absolute excellence. 🌸"]
+    await interaction.response.send_message(embed=make_maggie_embed("💖 HIGH-VALUE VALIDATION NOTIFICATION", random.choice(lines)))
+
+@bot.tree.command(name="hype", description="inject explosive main-character energy strings into the chat processing pipeline 🚀")
+async def hype_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=make_maggie_embed("🚀 INITIATING ABSOLUTE INFRASTRUCTURE HYPE GRID", "## ✨ WAIT, WHO ALLOWED YOU TO SLAY THIS HARD?! 🗣️💅\n\neveryone stop typing immediately and look at this complete display of elite performance metrics! un-cancellable main character event verified. 🔮"))
+
+@bot.tree.command(name="rate_outfit", description="submit details of a specific textile arrangement for visual evaluation 👗")
+async def rate_outfit_cmd(interaction: discord.Interaction, description: str):
+    score = random.randint(8, 10) # maggie never fails a bestie completely
+    await interaction.response.send_message(embed=make_maggie_embed("👗 TEXTILE DESIGN COMPILATION RATING", f"Analyzing design description array: *\"{description}\"*\n\n> **Aesthetic Output:** `9.99/{score}` Metric Rating! completely locked into the seasonal lookbook matrix. 💅🌟"))
+
+@bot.tree.command(name="manifest_crush", description="run cross-compatibility equations on a secret crush configuration profile 💘")
+async def manifest_crush_cmd(interaction: discord.Interaction, crush_name: str):
+    match_rate = random.randint(40, 100)
+    verdict = "literal twin flames compiled natively! go text them immediately. 💘" if match_rate > 80 else "stable connection pathways, go share an iced beverage layer. ✨" if match_rate > 60 else "bobby pin tracking error, their frequency looks like a total flop. dump them! 💀"
+    await interaction.response.send_message(embed=make_maggie_embed("🔮 ROMANTIC MATCHING ANALYSIS ENGINE", f"Cross-referencing your aura with target string: **\"{crush_name}\"**\n\n• **Alignment Rate:** `{match_rate}%` Functional Sync\n• **Mainframe Analysis:** {verdict}"))
+
+@bot.tree.command(name="watercheck", description="run an emergency diagnostic scan on your systemic hydration layers 💧")
+async def watercheck_cmd(interaction: discord.Interaction):
+    status = random.choice(["**OPTIMAL HYDRO-QUEEN STABILITY:** cellular structures completely saturated with premium spring water! 💧💅", "**CRITICAL DRY FLOP DETECTED:** your system is literal desert dust. run to the kitchen and consume 1 liter of filtered water right now! 🚨💀", "**MATCHIFIED FLUID LAYERS:** tracking sheets show high matcha saturation indexes. insert pure alkaline water immediately. 🧊"])
+    await interaction.response.send_message(embed=make_maggie_embed("💧 ECO-HYDRATION SCAN METRICS", f"scanning cellular fluid structures for {interaction.user.mention}:\n\n> {status}"))
+
+@bot.tree.command(name="gossip_mode", description="[SERVER MOD] toggle internal high-drama processing scripts on or off ⚙️")
+async def gossip_mode_cmd(interaction: discord.Interaction):
+    g_id = interaction.guild_id
+    current = GOSSIP_TOGGLE.get(g_id, False)
+    GOSSIP_TOGGLE[g_id] = not current
+    status_str = "ENABLED 💅 • compiling high-drama response matrices" if GOSSIP_TOGGLE[g_id] else "DISABLED 🔮 • returning to baseline polite configurations"
+    await interaction.response.send_message(embed=make_maggie_embed("⚙️ STRUCTURAL MODE ADJUSTMENT", f"Gossip interface processing state is now: **{status_str}**"))
+
+@bot.tree.command(name="shatter", description="completely smash bad energetic blockades or awkward silence loops in chat 🔨")
+async def shatter_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=make_maggie_embed("🔨 ENERGETIC SHATTER PROTOCOL INITIATED", "💥 ***CRASH!!!*** 💥\n\nthere goes the bad vibe barrier. the room frequency has been forcibly shattered and replaced with pure sparkle energy layouts! proceed to slay. 💅💎"))
+
+@bot.tree.command(name="affirmation", description="request an on-demand premium spiritual validation tracking sheet 📜")
+async def affirmation_cmd(interaction: discord.Interaction):
+    quotes = ["I am a magnet for premium iced beverages, massive aura accumulations, and complete peace of mind. ✨", "My value cannot be calculated or depreciated by outside flop operations. 💅", "I am completely locked into an elite growth timeline and all my projects compile beautifully. 🌸"]
+    await interaction.response.send_message(embed=make_maggie_embed("📜 ARCHIVED AFFIRMATION BLOCK MANIFESTED", f"> **\"{random.choice(quotes)}\"**\n\n*read this three times while drinking alkaline fluid arrays.* 🔮"))
+
+@bot.tree.command(name="drama_alert", description="trigger an immediate critical notifications grid for extremely minor server occurrences 🚨")
+async def drama_alert_cmd(interaction: discord.Interaction, incident: str):
+    await interaction.response.send_message(embed=make_maggie_embed("🚨 HIGH-DENSITY CRITICAL DRAMA BROADCAST", f"## 📢 ATTENTION EVERYONE IN THE CORE AREA:\n\nwe have an absolute code-pink emergency validation event! report immediately:\n\n> *\"{incident}\"* 👀🍿"))
+
+@bot.tree.command(name="manifest_grade", description="manifest passing your academic testing protocols with complete effortless perfection 📖")
+async def manifest_grade_cmd(interaction: discord.Interaction, class_name: str):
+    await interaction.response.send_message(embed=make_maggie_embed("📖 ACADEMIC EVALUATION MATERIALIZATION MATRIX", f"injecting intelligence parameters and structural memory layout locks for course: **\"{class_name}\"**\n\n> **Materialized Output:** `A+ Distinction` status locked onto your official academic ledger profile! go celebrate with boba. 💅🎓"))
+
+@bot.tree.command(name="cozy_vibes", description="adjust ambient parameters to maximize maximum lounge comfort fields 🧸")
+async def cozy_vibes_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=make_maggie_embed("🧸 LOUNGE COMFORT GRID LOCKED IN", "• Ambient Lighting: `Motion-Activated Warm Hue` 🕯️\n• Blanket Thickness: `Maximum Heavy Plush` ☁️\n• Audio Tracking: `Soft Retro Low-Fidelity Rock` 🎸\n\n*chat frequency turned down to cozy baseline parameters.* ✨"))
+
+@bot.tree.command(name="slay_rating", description="audit precisely how hard a bestie is crushing the competition matrix 📈")
+async def slay_rating_cmd(interaction: discord.Interaction, user: discord.User = None):
+    t = user or interaction.user
+    rating = random.randint(500000, 1000000)
+    await interaction.response.send_message(embed=make_maggie_embed("📈 MATRICULATED SLAY-RATE COMPILATION", f"auditing performance metrics for {t.mention}:\n\n> Score: **{rating:,}/1,000,000** Absolute Points! completely off the standard tracking scales. 💅🔥"))
+
+@bot.tree.command(name="unhex", description="purge your account profiles of all minor curses, hexes, or slow internet bad luck anomalies 🪄")
+async def unhex_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=make_maggie_embed("🪄 DEFENSIVE APPARATUS COUNTER-SPELL SYNC", f"clearing tracking sheets for {interaction.user.mention}...\n\nAll petty hexes, low-battery anomalies, and slow charger frequencies have been cleanly wiped from your matrix parameters! 🔮✨"))
+
 
 # --- 💬 INTERACTIVE CONTROLS & CHAT PASSIVES ---
 
