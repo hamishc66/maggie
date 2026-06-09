@@ -2,7 +2,7 @@ import os
 import random
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 import aiohttp
 from datetime import date
 from google import genai
@@ -72,6 +72,32 @@ class MagicalBot(commands.Bot):
 
 bot = MagicalBot()
 
+# --- 💖 AUTOMATIC BACKGROUND KINDNESS TASK ---
+@tasks.loop(hours=12)
+async def automatic_kindness():
+    """generates and broadcasts an ultra-supportive kind manifestation every 12 hours"""
+    system_prompt = (
+        "You are 'Magical Maggie's Assistant'. Generate a super preppy, magic-themed, hyper-supportive, "
+        "and genuinely kind manifestation or positive affirmation for the besties in the chat. "
+        "Make it incredibly sweet, validating, and packed with sparkle emojis. No filler introductions, jump straight into the love."
+    )
+    try:
+        response = await google_client.aio.models.generate_content(
+            model="gemini-2.5-flash", 
+            contents="manifest something beautiful and supportive for the world today",
+            config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=600)
+        )
+        embed = make_maggie_embed("💖 COSMIC KINDNESS ACTIVATION ✨", response.text)
+        embed.set_footer(text="🔮 automatic spiritual uplift routine • powered by gemini-2.5-flash")
+        
+        # loop through all guilds the bot is connected to and drop the embed in a text channel
+        for guild in bot.guilds:
+            channel = guild.system_channel or next((c for c in guild.text_channels if c.permissions_for(guild.me).send_messages), None)
+            if channel:
+                await channel.send(embed=embed)
+    except Exception as e:
+        print(f"failed to execute automatic kindness wave: {e}")
+
 @bot.event
 async def on_guild_join(guild):
     owner = guild.owner or await bot.fetch_user(guild.owner_id)
@@ -94,7 +120,7 @@ async def on_guild_join(guild):
         )
         embed.add_field(
             name="🛡️ automated defense configuration", 
-            value="the `bad.txt` data loop is monitoring chat. any flagged terms or toxic frequencies will be instantly vaporized, messages deleted, and target profiles hit with public astral cancellations.", 
+            value="the `bad.txt` data loop is monitoring chat. any flagged terms or toxic frequencies will be instantly hit with public astral cancellations. message deletion has been deactivated.", 
             inline=False
         )
         embed.add_field(
@@ -102,7 +128,7 @@ async def on_guild_join(guild):
             value="• **Social Engineering:** `/cancel`, `/gaslight`, `/gatekeep`, `/girlboss` \n• **Esoteric Matrix:** `/starbucks_order`, `/coachella_lineup`, `/spiritual_gossip`, `/realign_chakras` \n• **Core Processing:** `/ai`, `/ermactually`, `/allowance`, `/vibecheck`, `/aura`, `/slaydar`, `/manifest`, `/crystals`, `/potion`", 
             inline=False
         )
-        embed.set_footer(text="system build v2.4.2 • initializing immaculate server vibe stabilization 💖")
+        embed.set_footer(text="system build v2.4.3 • initializing immaculate server vibe stabilization 💖")
         await owner.send(embed=embed)
     except Exception as e:
         print(f"could not trigger onboarding: {e}")
@@ -110,6 +136,9 @@ async def on_guild_join(guild):
 @bot.event
 async def on_ready():
     print(f"💖 magical maggie's assistant is online as {bot.user}!")
+    # spin up the automatic kindness clock loop safely if it isn't running already
+    if not automatic_kindness.is_running():
+        automatic_kindness.start()
 
 # --- 🔮 ACCOUNT ALLOWANCE METER COMMAND ---
 
@@ -512,9 +541,9 @@ async def on_message(message):
     
     banned_list = load_banned_words()
     if any(word in content for word in banned_list):
-        try: await message.delete()
-        except discord.Forbidden: pass
-        await message.channel.send(embed=make_maggie_embed("🚨 OMG CANCELLED?! 🔮❌", f"{message.author.mention} did you actually just say that? my psychic crystals are shattering. BYE."))
+        # target block deleted to prevent physical message purging completely
+        embed = make_maggie_embed("🚨 OMG CANCELLED?! 🔮❌", f"{message.author.mention} did you actually just say that? my psychic crystals are shattering. BYE.")
+        await message.channel.send(embed=embed)
         return
 
     if message.content.isupper() and len(message.content) > 12:
