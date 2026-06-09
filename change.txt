@@ -1,0 +1,6 @@
+- added visual slay certificates 💅
+- upgraded client architecture to user apps 🚀
+- fixed wikipedia api connectivity errors 📖
+- REMOVED FAG FILTER BECAUSE WE LOVE FAGS
+- made it more preppy to slay the day
+- added gossip mode 🤭

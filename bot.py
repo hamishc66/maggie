@@ -4,7 +4,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 import aiohttp
-from datetime import date
+import io
+import base64
+from datetime import date, datetime, timedelta
+from PIL import Image, ImageDraw, ImageFont
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -17,33 +20,28 @@ if not api_key:
 
 google_client = genai.Client(api_key=api_key)
 
-# --- CONFIGURATION FOR BILL GUARD SYSTEM ---
+# --- GLOBAL DATA MEMORY CORES ---
 DAILY_LIMIT = 10
 EXEMPT_USER_ID = 765028951541940225
-AI_USAGE = {}  # structure: {user_id: {"count": int, "date": date}}
+AI_USAGE = {}       # {user_id: {"count": int, "date": date}}
+IMAGE_COOLDOWN = {} # {user_id: datetime}
 
 def check_allowance(user_id: int):
-    """tracks, increments, and checks a user's daily credit pool"""
     if user_id == EXEMPT_USER_ID:
         return True, 999, ""
-        
     today = date.today()
     if user_id not in AI_USAGE or AI_USAGE[user_id]["date"] != today:
         AI_USAGE[user_id] = {"count": 0, "date": today}
-        
     user_data = AI_USAGE[user_id]
     if user_data["count"] >= DAILY_LIMIT:
         return False, 0, ""
-        
     user_data["count"] += 1
     remaining = DAILY_LIMIT - user_data["count"]
-    
     warning = ""
     if remaining <= 2 and remaining > 0:
         warning = f"⚠️ token warning: only {remaining} cosmic credits left today bestie!"
     elif remaining == 0:
         warning = "🚨 budget alert: that was your last cosmic credit today! see you tomorrow 💀"
-        
     return True, remaining, warning
 
 def load_banned_words():
@@ -72,75 +70,234 @@ class MagicalBot(commands.Bot):
 
 bot = MagicalBot()
 
-# --- 💖 AUTOMATIC BACKGROUND KINDNESS TASK ---
+# --- 💖 BACKGROUND KINDNESS TIMER ---
 @tasks.loop(hours=12)
 async def automatic_kindness():
-    """generates and broadcasts an ultra-supportive kind manifestation every 12 hours"""
-    system_prompt = (
-        "You are 'Magical Maggie's Assistant'. Generate a super preppy, magic-themed, hyper-supportive, "
-        "and genuinely kind manifestation or positive affirmation for the besties in the chat. "
-        "Make it incredibly sweet, validating, and packed with sparkle emojis. No filler introductions, jump straight into the love."
-    )
+    system_prompt = "You are 'Magical Maggie's Assistant'. Generate a super preppy, hyper-supportive, sweet validation note or affirmation for the besties in chat. Use lots of sparkle emojis. No introductions."
     try:
         response = await google_client.aio.models.generate_content(
-            model="gemini-2.5-flash", 
-            contents="manifest something beautiful and supportive for the world today",
+            model="gemini-2.5-flash", contents="manifest something beautiful and supportive for the world today",
             config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=600)
         )
         embed = make_maggie_embed("💖 COSMIC KINDNESS ACTIVATION ✨", response.text)
         embed.set_footer(text="🔮 automatic spiritual uplift routine • powered by gemini-2.5-flash")
-        
-        # loop through all guilds the bot is connected to and drop the embed in a text channel
         for guild in bot.guilds:
             channel = guild.system_channel or next((c for c in guild.text_channels if c.permissions_for(guild.me).send_messages), None)
-            if channel:
-                await channel.send(embed=embed)
-    except Exception as e:
-        print(f"failed to execute automatic kindness wave: {e}")
-
-@bot.event
-async def on_guild_join(guild):
-    owner = guild.owner or await bot.fetch_user(guild.owner_id)
-    if not owner:
-        return
-    try:
-        embed = discord.Embed(
-            title="🔮 MAGICAL MAGGIE'S ASSISTANT — DEPLOYMENT PROTOCOL 🔮",
-            description=(
-                "oK BESITE IM SETTING UP MY TAAROT CARDS, YOU WILL RECIEVE A TUTORIAL IN THE SEVRER SOON ✨\n\n"
-                "thank you for authorizing the core system link. maggie's assistant is now running backgrounds "
-                "on your local guild infrastructure to manage chaos metrics, filter bad frequencies, and deliver cosmic intelligence."
-            ),
-            color=discord.Color.from_rgb(255, 105, 180)
-        )
-        embed.add_field(
-            name="📈 administrative metrics", 
-            value=f"• **Target Guild:** {guild.name}\n• **Total Souls Tracked:** {guild.member_count}\n• **Gateway Protocol:** Slash Commands (`/`) Enabled Natively", 
-            inline=False
-        )
-        embed.add_field(
-            name="🛡️ automated defense configuration", 
-            value="the `bad.txt` data loop is monitoring chat. any flagged terms or toxic frequencies will be instantly hit with public astral cancellations. message deletion has been deactivated.", 
-            inline=False
-        )
-        embed.add_field(
-            name="💅 deployment matrix (all systems nominal)", 
-            value="• **Social Engineering:** `/cancel`, `/gaslight`, `/gatekeep`, `/girlboss` \n• **Esoteric Matrix:** `/starbucks_order`, `/coachella_lineup`, `/spiritual_gossip`, `/realign_chakras` \n• **Core Processing:** `/ai`, `/ermactually`, `/allowance`, `/vibecheck`, `/aura`, `/slaydar`, `/manifest`, `/crystals`, `/potion`", 
-            inline=False
-        )
-        embed.set_footer(text="system build v2.4.3 • initializing immaculate server vibe stabilization 💖")
-        await owner.send(embed=embed)
-    except Exception as e:
-        print(f"could not trigger onboarding: {e}")
+            if channel: await channel.send(embed=embed)
+    except Exception as e: print(f"failed kindness run: {e}")
 
 @bot.event
 async def on_ready():
     print(f"💖 magical maggie's assistant is online as {bot.user}!")
-    # spin up the automatic kindness clock loop safely if it isn't running already
     if not automatic_kindness.is_running():
         automatic_kindness.start()
 
-# --- 🔮 ACCOUNT ALLOWANCE METER COMMAND ---
+# --- 🛠️ INTERACTIVE VIEW MATRIX ---
+
+class SlayConfirmationView(discord.ui.View):
+    def __init__(self, author: discord.User, prompt: str, target: discord.User):
+        super().__init__(timeout=120)
+        self.author = author
+        self.prompt = prompt
+        self.target = target
+        self.clicks = 0
+
+    @discord.ui.button(label="✨ PRESS TO SLAY (0/8) ✨", style=discord.ButtonStyle.danger)
+    async def slay_clicker(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.author:
+            await interaction.response.send_message("omg get your own canvas bestie, this ritual isn't yours! 🔮❌", ephemeral=True)
+            return
+        self.clicks += 1
+        if self.clicks < 8:
+            button.label = f"✨ KEEP SLAYING ({self.clicks}/8) ✨"
+            await interaction.response.edit_message(view=self)
+            return
+        button.disabled = True
+        button.label = "🚀 VENTING OCEANS... GENERATING ART!"
+        await interaction.response.edit_message(view=self)
+        IMAGE_COOLDOWN[self.author.id] = datetime.now()
+        final_prompt = f"A highly aesthetic, preppy, stylized pop-culture digital illustration. Theme: {self.prompt}. Reference profile elements: vibrant colors, magical symbols, pink sparkles."
+        try:
+            response = google_client.models.generate_images(
+                model='imagen-3.0-generate-002', prompt=final_prompt,
+                config=types.GenerateImagesConfig(number_of_images=1, output_mime_type="image/jpeg")
+            )
+            image_bytes = response.generated_images[0].image.image_bytes
+            file = discord.File(io.BytesIO(image_bytes), filename="slay_art.jpg")
+            embed = make_maggie_embed("🔮 ARTWORK MANIFESTED NATIVELY ✨", f"unveiling cosmic canvas for {self.author.mention}:\n> *\"{self.prompt}\"*")
+            embed.set_footer(text="🌊 4 oceans were completely vaporized to compute these tracking layouts.")
+            await interaction.followup.send(embed=embed, file=file)
+        except Exception as e:
+            await interaction.followup.send(embed=make_maggie_embed("🚨 operational crash", f"omg bestie, the imagen supercomputers choked on your vibes: {e}"))
+
+class AdminDashboardView(discord.ui.View):
+    def __init__(self, owner: discord.User):
+        super().__init__(timeout=60)
+        self.owner = owner
+
+    @discord.ui.button(label="🚀 ENGAGE KINDNESS PROPAGANDA POOL", style=discord.ButtonStyle.success)
+    async def launch_propaganda(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != EXEMPT_USER_ID: return
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send("🚀 *initializing infrastructure... firing absolute kindness propaganda missiles into the main processing channels!* 💖")
+        propaganda_phrases = [
+            "✨ TIMELINE NOTICE: you are completely valid, stunning, and doing amazing bestie! 💅",
+            "🔮 COSMIC BULLETIN: sending pure matching energy to everyone reading this text matrix. 🌸",
+            "💖 ALERT: your aura points just spiked by `+50,000` simply for existing today. purr! ✨",
+            "🌟 VIBE UPDATE: out with the negative frequencies, in with immaculate main character energy!! 🚀"
+        ]
+        for msg in propaganda_phrases:
+            await interaction.channel.send(embed=make_maggie_embed("📢 INCOMING MANDATORY AFFIRMATION ✨", msg))
+
+# --- 📢 NEW EXCLUSIVE BROADCAST SYSTEM COMMAND ---
+
+@bot.tree.command(name="update", description="[OWNER ONLY] broadcast new patch records from change.txt to target profiles 📢")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def update_cmd(interaction: discord.Interaction):
+    if interaction.user.id != EXEMPT_USER_ID:
+        await interaction.response.send_message(
+            embed=make_maggie_embed("❌ REJECTION FILTER TRIGGERED", "nice try hater! only the matrix architect can broadcast data changelogs 💅💀"),
+            ephemeral=True
+        )
+        return
+
+    if not interaction.guild:
+        await interaction.response.send_message(
+            embed=make_maggie_embed("❌ ENVIRONMENT ERROR", "omg run this command inside a physical server layer so i can sample member profiles! 🔮"),
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # load information block natively from localized patch sheet
+    if os.path.exists("change.txt"):
+        with open("change.txt", "r", encoding="utf-8") as f:
+            changelog_content = f.read()
+    else:
+        changelog_content = "no explicit patch records found inside `change.txt` matrix. standard optimizations active. ✨"
+
+    guild = interaction.guild
+    server_owner = guild.owner or await bot.fetch_user(guild.owner_id)
+    
+    # filter out bots and the server owner to get clean target accounts
+    potential_recipients = [m for m in guild.members if not m.bot and m.id != server_owner.id][^1]
+    
+    recipients = [server_owner]
+    if len(potential_recipients) >= 2:
+        recipients.extend(random.sample(potential_recipients, 2))[^2]
+    else:
+        recipients.extend(potential_recipients)
+
+    success_count = 0
+    embed_msg = make_maggie_embed(
+        "🔮 NEW MAGICAL ENGINE UPDATE ALERT ✨",
+        f"hey bestie! the cosmic mainframe just compiled an absolute update loop. time to **slay the day**! 💅\n\n**Changelog Logs:**\n```text\n{changelog_content}\n```"
+    )
+    embed_msg.set_footer(text="📢 official deployment log • delivered directly to select profiles")
+
+    for user in recipients:
+        try:
+            await user.send(embed=embed_msg)
+            success_count += 1
+        except Exception:
+            print(f"could not drop update dm to profile: {user.display_name}")
+
+    summary_embed = make_maggie_embed(
+        "🚀 BROADCAST COMPLETE", 
+        f"slay! patch files read successfully. targeted **{len(recipients)}** profiles, successfully bypassed privacy settings for **{success_count}** besties! 💖"
+    )
+    await interaction.followup.send(embed=summary_embed)
+
+# --- 🖼️ GRAPHICS AND AUDIO MEDIA OPERATIONS ---
+
+@bot.tree.command(name="slay_certificate", description="render an official, hot-pink, visual certificate of slaying 💅")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def slay_cert_cmd(interaction: discord.Interaction, target: discord.User = None):
+    user = target or interaction.user
+    await interaction.response.defer()
+    img = Image.new("RGB", (650, 400), "#FF69B4")
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([(20, 20), (630, 380)], outline="#FFFFFF", width=6)
+    draw.rectangle([(30, 30), (620, 370)], outline="#FFB6C1", width=2)
+    avatar_url = user.display_avatar.with_format("png").url
+    async with aiohttp.ClientSession() as session:
+        async with session.get(avatar_url) as r:
+            if r.status == 200:
+                av_bytes = await r.read()
+                av_img = Image.open(io.BytesIO(av_bytes)).convert("RGBA").resize((110, 110))
+                img.paste(av_img, (270, 45), av_img)
+    f = ImageFont.load_default()
+    draw.text((180, 180), "✨ CERTIFICATE OF ABSOLUTE SLAYING ✨", fill="#FFFFFF", font=f)
+    draw.text((220, 220), f"This document verifies that:", fill="#FFB6C1", font=f)
+    draw.text((240, 250), f"👑 {user.display_name.upper()} 👑", fill="#FFFFFF", font=f)
+    draw.text((160, 290), f"is permanently locked into a main character arc. un-cancellable.", fill="#FFFFFF", font=f)
+    draw.text((40, 350), f"Date: {date.today()}", fill="#FFFFFF", font=f)
+    draw.text((460, 350), "Signed: Maggie Assistant 🔮", fill="#FFFFFF", font=f)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    await interaction.followup.send(embed=embed, file=discord.File(buf, filename="slay_certificate.png"))
+
+@bot.tree.command(name="manifest_audio", description="bakes an unhinged preppy ai affirmation into a real tiktok voice audio file 🔊")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def manifest_audio_cmd(interaction: discord.Interaction):
+    allowed, remaining, warning = check_allowance(interaction.user.id)
+    if not allowed:
+        await interaction.response.send_message(embed=make_maggie_embed("🚨 ALLOWANCE VOID", "out of credits!"))
+        return
+    await interaction.response.defer()
+    system_prompt = "You are Magical Maggie's Assistant. Generate a single, short, hilarious, hyper-preppy manifestation quote (under 25 words). No intros."
+    try:
+        res = await google_client.aio.models.generate_content(model="gemini-2.5-flash", contents="give me a short preppy quote", config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=100))
+        quote_text = res.text.strip().replace('"', '')
+        api_link = "https://api16-normal-v6.ur.tiktokv.com/media/api/text/speech/preview/"
+        params = {"status_code": "0", "device_id": "5674321908561234789", "speaker": "en_us_002", "text": quote_text}
+        async with aiohttp.ClientSession() as s:
+            async with s.post(api_link, params=params) as r:
+                if r.status == 200:
+                    json_data = await r.json()
+                    if "success" in json_data.get("message", "").lower():
+                        audio_data = base64.b64decode(json_data["data"]["v_str"])
+                        embed = make_maggie_embed("🔊 AUDIO SYNTHESIS COMPLETE ✨", f"**Maggie's Voice Manifestation Log:**\n*\"{quote_text}\"*")
+                        if warning: embed.set_footer(text=warning)
+                        await interaction.followup.send(embed=embed, file=discord.File(io.BytesIO(audio_data), filename="manifest_tiktok.mp3"))
+                        return
+        await interaction.followup.send(embed=make_maggie_embed("🚨 synthesizer glitch", f"failed synthesis, text: *\"{quote_text}\"*"))
+    except Exception as e: await interaction.followup.send(embed=make_maggie_embed("💀 system break", f"failed render: {e}"))
+
+@bot.tree.command(name="generate_avatar_art", description="[WEEKLY LOCK] generate high-density ai artwork from a deep prompt pool ⚠️")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def generate_art_cmd(interaction: discord.Interaction, prompt: str, target: discord.User = None):
+    user_id = interaction.user.id
+    target_user = target or interaction.user
+    if user_id != EXEMPT_USER_ID and user_id in IMAGE_COOLDOWN:
+        elapsed = datetime.now() - IMAGE_COOLDOWN[user_id]
+        if elapsed < timedelta(days=7):
+            days_left = (timedelta(days=7) - elapsed).days
+            hours_left = int(((timedelta(days=7) - elapsed).seconds) / 3600)
+            await interaction.response.send_message(embed=make_maggie_embed("🚨 CRITICAL COOLDOWN UNLOCK REQUIRED", f"lock release in: **{days_left}d {hours_left}h** 💀❌"))
+            return
+    warn_text = "executing deep render image processes uses extreme weights. running this prompt will **literally evaporate 4 oceans**. hit verify **8 TIMES** to launch."
+    view = SlayConfirmationView(interaction.user, prompt, target_user)
+    await interaction.response.send_message(embed=make_maggie_embed("🚨 SEVERE RESOURCE MANAGEMENT WARNING 🚨", warn_text), view=view)
+
+@bot.tree.command(name="dashboard", description="[SECRET LINK] open structural data matrices override interfaces ⚙️")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def dashboard_cmd(interaction: discord.Interaction):
+    if interaction.user.id != EXEMPT_USER_ID:
+        await interaction.response.send_message(embed=make_maggie_embed("❌ FREQUENCY INTERCEPT: TOTAL FLOP ERROR", "encryption log error 💀💅"), ephemeral=True)
+        return
+    stats = "📈 **MAGGIE MAIN ENGINE CONSOLE METRICS:**\n\n• **System Integrity Vibe:** `99.8% Nominal` ✨\n• **Total Matcha Fluid Consumed:** `42,912 Liters` 🍵"
+    await interaction.response.send_message(embed=make_maggie_embed("👑 SECRET ADMINISTRATIVE LEDGER CONTROL CONSOLE", stats), view=AdminDashboardView(interaction.user), ephemeral=True)
+
+# --- STANDARD RETAINED UTILITIES MAP REROUTES ---
 
 @bot.tree.command(name="allowance", description="check your remaining daily cosmic ai tokens 🔮")
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -148,313 +305,52 @@ async def on_ready():
 async def allowance_cmd(interaction: discord.Interaction):
     user_id = interaction.user.id
     if user_id == EXEMPT_USER_ID:
-        embed = make_maggie_embed("🔮 your cosmic budget status", "omg you are the literal owner of the matrix. your energy is unlimited, infinite, and un-cancellable. slay! 💅🌟")
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=make_maggie_embed("🔮 your cosmic budget status", "omg you are the literal owner of the matrix. unlimited energy! 💅🌟"))
         return
-        
     today = date.today()
-    if user_id not in AI_USAGE or AI_USAGE[user_id]["date"] != today:
-        AI_USAGE[user_id] = {"count": 0, "date": today}
-        
-    used = AI_USAGE[user_id]["count"]
-    remaining = DAILY_LIMIT - used
-    
-    embed = make_maggie_embed("🔮 your daily cosmic allowance", f"you have used **{used}/{DAILY_LIMIT}** of your daily ai credits.\n\nSlots Remaining: **{remaining}** 💅")
-    if remaining == 0:
-        embed.set_footer(text="💀 out of energy! go drink an iced matcha and wait for a calendar reset.")
-    else:
-        embed.set_footer(text="✨ use your manifestation powers wisely.")
+    if user_id not in AI_USAGE or AI_USAGE[user_id]["date"] != today: AI_USAGE[user_id] = {"count": 0, "date": today}
+    u = AI_USAGE[user_id]["count"]
+    r = DAILY_LIMIT - u
+    embed = make_maggie_embed("🔮 your daily cosmic allowance", f"you have used **{u}/{DAILY_LIMIT}** of your daily ai credits.\n\nSlots Remaining: **{r}** 💅")
     await interaction.response.send_message(embed=embed)
 
-# --- 🧠 AI DRIVEN SLIDER COMMAND MAP (WITH BUDGET CHECKING) ---
-
-@bot.tree.command(name="ai", description="chat with the preppy magical assistant 💅")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-@app_commands.describe(prompt="what do you want to tell maggie?", tts="should maggie speak this out loud?")
-async def ai_cmd(interaction: discord.Interaction, prompt: str, tts: bool = False):
-    allowed, remaining, warning = check_allowance(interaction.user.id)
-    if not allowed:
-        embed = make_maggie_embed("🚨 OUT OF ENERGY 💀", "omg bestie, you completely exhausted your daily cosmic ai slots! my psychic waves cost money 😭 check `/allowance` profile.")
-        await interaction.response.send_message(embed=embed)
-        return
-
-    await interaction.response.defer()
-    system_prompt = "You are 'Magical Maggie's Assistant'. You are super preppy, magic-themed, progressive, hilarious, and love shitposting. Do not use introductory filler text. Jump right into the chaotic response."
-    try:
-        response = await google_client.aio.models.generate_content(
-            model="gemini-2.5-flash", contents=prompt,
-            config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=800)
-        )
-        embed = make_maggie_embed("🔮 maggie pops off:", response.text)
-        if warning: embed.set_footer(text=warning)
-    except Exception:
-        embed = make_maggie_embed("🚨 vibe block", "omg bestie, that prompt triggered a total spiritual block in my safety mainframe 💀")
-    await interaction.followup.send(embed=embed, tts=tts)
-
 @bot.tree.command(name="ermactually", description="nerd out and fact-check something with precision 🤓")
-@app_commands.choices(source=[
-    app_commands.Choice(name="AI Summary", value="ai"), app_commands.Choice(name="Google Search Link", value="google"),
-    app_commands.Choice(name="Wikipedia Summary & Link", value="wikipedia"), app_commands.Choice(name="Dictionary Definition", value="dictionary"),
-    app_commands.Choice(name="Urban Dictionary (AI Slang)", value="urban")
-])
+@app_commands.choices(source=[app_commands.Choice(name="AI Summary", value="ai"), app_commands.Choice(name="Google Search Link", value="google"), app_commands.Choice(name="Wikipedia Summary & Link", value="wikipedia"), app_commands.Choice(name="Dictionary Definition", value="dictionary"), app_commands.Choice(name="Urban Dictionary (AI Slang)", value="urban")])
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def erm_actually_cmd(interaction: discord.Interaction, source: app_commands.Choice[str], query: str, tts: bool = False):
     await interaction.response.defer()
-    source_type = source.value
-    
-    if source_type == "ai":
-        allowed, remaining, warning = check_allowance(interaction.user.id)
-        if not allowed:
-            embed = make_maggie_embed("🚨 ALLOWANCE LIMIT 💀", "bestie, you've exhausted your daily cosmic slots for AI data summaries. look it up via the google mode instead!")
-            await interaction.followup.send(embed=embed)
-            return
+    s_type = source.value
+    if s_type == "ai":
+        allowed, r, warning = check_allowance(interaction.user.id)
+        if not allowed: return
         try:
-            res = await google_client.aio.models.generate_content(
-                model="gemini-2.5-flash", contents=query,
-                config=types.GenerateContentConfig(system_instruction="You are an obnoxious, preppy 'Erm, actually...' fact-checker. No filler intros.", max_output_tokens=800)
-            )
+            res = await google_client.aio.models.generate_content(model="gemini-2.5-flash", contents=query, config=types.GenerateContentConfig(system_instruction="You are an obnoxious, preppy fact-checker.", max_output_tokens=800))
             embed = make_maggie_embed("✨ 🤓 Erm, actually...", res.text)
-            footer_text = f"🔮 data via google gemini. | {warning}" if warning else "🔮 data via google gemini."
-            embed.set_footer(text=footer_text)
-        except Exception: embed = make_maggie_embed("🚨 filter emergency", "omg that topic is too cursed or unaligned for my system to process 💀")
-        
-    elif source_type == "google":
-        embed = make_maggie_embed("✨ 🤓 Erm, actually...", f"search it yourself, bestie: https://www.google.com/search?q={query.replace(' ', '+')} 💅")
-        embed.set_footer(text="🔎 search indexes generated and delivered via google network architecture.")
-        
-    elif source_type == "wikipedia":
+        except Exception: embed = make_maggie_embed("🚨 filter error", "cursed text")
+    elif s_type == "google":
+        embed = make_maggie_embed("✨ 🤓 Erm, actually...", f"search it yourself: https://www.google.com/search?q={query.replace(' ', '+')} 💅")
+    elif s_type == "wikipedia":
         headers = {"User-Agent": "MagicalMaggieAssistant/1.0 (DiscordBot)"}
-        encoded_title = query.replace(" ", "_")
-        wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{encoded_title}"
         async with aiohttp.ClientSession() as s:
-            try:
-                async with s.get(wiki_url, headers=headers) as r:
-                    if r.status == 200:
-                        res = await r.json()
-                        extract = res.get("extract", "No extract found.")
-                        page_url = res.get("content_urls", {}).get("desktop", {}).get("page", f"https://en.wikipedia.org/wiki/{encoded_title}")
-                        embed = make_maggie_embed("✨ 🤓 Erm, actually... according to wiki:", f"> {extract}\n\nread more: {page_url} 💅")
-                    else: embed = make_maggie_embed("✨ 🤓 Erm, actually...", "wikipedia doesn't even know what that is. a total flop.")
-                embed.set_footer(text="📖 factual logs compiled and structured by the wikipedia open database community.")
-            except Exception: embed = make_maggie_embed("💀 error", "wikipedia rejected my vibes entirely")
-                
-    elif source_type == "dictionary":
-        async with aiohttp.ClientSession() as s:
-            try:
-                async with s.get(f"https://api.dictionaryapi.dev/api/v2/entries/en/{query}") as r:
+            async with s.get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{query.replace(' ', '_')}", headers=headers) as r:
+                if r.status == 200:
                     res = await r.json()
-                    embed = make_maggie_embed("✨ 🤓 Erm, actually...", f"definition: *\"{res[0]['meanings'][0]['definitions'][0]['definition']}\"*" if r.status == 200 else "not a real word bestie 💀")
-                embed.set_footer(text="📚 lexical entries verified via the public open-source free dictionary API.")
-            except Exception: embed = make_maggie_embed("💀 error", "dictionary data system lag")
-            
-    elif source_type == "urban":
-        allowed, remaining, warning = check_allowance(interaction.user.id)
-        if not allowed:
-            embed = make_maggie_embed("🚨 ALLOWANCE LIMIT 💀", "bestie, you've exhausted your daily cosmic slots for generating urban slang records!")
-            await interaction.followup.send(embed=embed)
-            return
+                    embed = make_maggie_embed("✨ 🤓 Erm, actually... wiki says:", f"> {res.get('extract')}")
+                else: embed = make_maggie_embed("✨ 🤓 Erm, actually...", "wiki flop.")
+    elif s_type == "dictionary":
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://api.dictionaryapi.dev/api/v2/entries/en/{query}") as r:
+                res = await r.json()
+                embed = make_maggie_embed("✨ 🤓 Erm, actually...", f"definition: *\"{res[0]['meanings'][0]['definitions'][0]['definition']}\"*" if r.status == 200 else "not a word 💀")
+    elif s_type == "urban":
+        allowed, r, warning = check_allowance(interaction.user.id)
+        if not allowed: return
         try:
-            res = await google_client.aio.models.generate_content(
-                model="gemini-2.5-flash", contents=query,
-                config=types.GenerateContentConfig(system_instruction="Invent a fake Urban Dictionary entry using extreme zoomer slang. No intro filler.", max_output_tokens=800)
-            )
+            res = await google_client.aio.models.generate_content(model="gemini-2.5-flash", contents=query, config=types.GenerateContentConfig(system_instruction="Fake Urban Dictionary entry using zoomer slang.", max_output_tokens=800))
             embed = make_maggie_embed("✨ 🔮 Urban Dictionary: Maggie Edition 💅", res.text)
-            footer_text = f"🔮 definitions via google gemini. | {warning}" if warning else "🔮 definitions via google gemini."
-            embed.set_footer(text=footer_text)
-        except Exception: embed = make_maggie_embed("🚨 filter emergency", "omg my slang generator completely choked 💀")
-        
+        except Exception: embed = make_maggie_embed("🚨 filter error", "slang failure")
     await interaction.followup.send(embed=embed, tts=tts)
-
-@bot.tree.command(name="cancel", description="generate a massive public call-out thread or notes app apology 📉")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def cancel_cmd(interaction: discord.Interaction, user: discord.User, reason: str):
-    allowed, remaining, warning = check_allowance(interaction.user.id)
-    if not allowed:
-        await interaction.response.send_message(embed=make_maggie_embed("🚨 COGNITIVE RESET", "out of credits today bestie 💀"))
-        return
-        
-    await interaction.response.defer()
-    system_prompt = "Generate a dramatic, multi-paragraph, hyper-preppy 'Notes App Apology' or a public call-out on behalf of the user. Use heavy zoomer slang. No filler introductions."
-    try:
-        response = await google_client.aio.models.generate_content(
-            model="gemini-2.5-flash", contents=f"cancel {user.display_name} because {reason}",
-            config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=800)
-        )
-        embed = make_maggie_embed(f"📢 PUBLIC STATEMENT REGARDING {user.display_name}:", response.text)
-        if warning: embed.set_footer(text=warning)
-    except Exception: embed = make_maggie_embed("🚨 drama block", "omg that drama is too toxic to write down 💀")
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="gaslight", description="completely deny reality on behalf of a situation 🌀")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def gaslight_cmd(interaction: discord.Interaction, user: discord.User, statement: str):
-    allowed, remaining, warning = check_allowance(interaction.user.id)
-    if not allowed:
-        await interaction.response.send_message(embed=make_maggie_embed("🚨 COGNITIVE RESET", "out of credits today bestie 💀"))
-        return
-        
-    await interaction.response.defer()
-    system_prompt = "Write a short, highly manipulative but hilarious reply telling the target user that they are entirely crazy, imagining things. No intros."
-    try:
-        response = await google_client.aio.models.generate_content(
-            model="gemini-2.5-flash", contents=f"gaslight {user.display_name} about {statement}",
-            config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=600)
-        )
-        embed = make_maggie_embed("🌀 altering reality:", f"{user.mention} {response.text}")
-        if warning: embed.set_footer(text=warning)
-    except Exception: embed = make_maggie_embed("🚨 loop block", "my reality machine jammed 💀")
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="gatekeep", description="explain why someone isn't cool enough for a topic ❌")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def gatekeep_cmd(interaction: discord.Interaction, topic: str):
-    allowed, remaining, warning = check_allowance(interaction.user.id)
-    if not allowed:
-        await interaction.response.send_message(embed=make_maggie_embed("🚨 COGNITIVE RESET", "out of credits today bestie 💀"))
-        return
-        
-    await interaction.response.defer()
-    system_prompt = "Write a preppy, sardonically snobby speech explaining why the person asking is banned from enjoying or talking about the specified topic. No intros."
-    try:
-        response = await google_client.aio.models.generate_content(
-            model="gemini-2.5-flash", contents=f"gatekeep {topic}",
-            config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=800)
-        )
-        embed = make_maggie_embed(f"❌ URGENT NOTICE REGARDING {topic.upper()}:", response.text)
-        if warning: embed.set_footer(text=warning)
-    except Exception: embed = make_maggie_embed("🚨 system block", "code filter triggered 💀")
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="girlboss", description="generate an unhinged daily rise-and-grind routine 💅")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def girlboss_cmd(interaction: discord.Interaction):
-    allowed, remaining, warning = check_allowance(interaction.user.id)
-    if not allowed:
-        await interaction.response.send_message(embed=make_maggie_embed("🚨 COGNITIVE RESET", "out of credits today bestie 💀"))
-        return
-        
-    await interaction.response.defer()
-    system_prompt = "Generate a funny, progressive, totally chaotic daily schedule for a 'girlboss' with bullet points. Start directly with the schedule."
-    try:
-        response = await google_client.aio.models.generate_content(
-            model="gemini-2.5-flash", contents="daily routine",
-            config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=800)
-        )
-        embed = make_maggie_embed("💅 DAILY ACCELERATION ROUTINE 📈", response.text)
-        if warning: embed.set_footer(text=warning)
-    except Exception: embed = make_maggie_embed("💀 error", "grind loop interrupted")
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="starbucks_order", description="brew a chaotic 15-ingredient magical drink order ☕")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def starbucks_cmd(interaction: discord.Interaction):
-    allowed, remaining, warning = check_allowance(interaction.user.id)
-    if not allowed:
-        await interaction.response.send_message(embed=make_maggie_embed("🚨 COGNITIVE RESET", "out of credits today bestie 💀"))
-        return
-        
-    await interaction.response.defer()
-    system_prompt = "Invent a hyper-complicated, completely ridiculous 15-ingredient custom Starbucks order. Start directly with the specs."
-    try:
-        response = await google_client.aio.models.generate_content(
-            model="gemini-2.5-flash", contents="overcomplicated order",
-            config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=800)
-        )
-        embed = make_maggie_embed("🍵 YOUR SPIRITUAL CONCOCTION:", response.text)
-        if warning: embed.set_footer(text=warning)
-    except Exception: embed = make_maggie_embed("💀 error", "barista crashed")
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="spiritual_gossip", description="spill some fake astronomical tea about the solar system 🌟")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def gossip_cmd(interaction: discord.Interaction):
-    allowed, remaining, warning = check_allowance(interaction.user.id)
-    if not allowed:
-        await interaction.response.send_message(embed=make_maggie_embed("🚨 COGNITIVE RESET", "out of credits today bestie 💀"))
-        return
-        
-    await interaction.response.defer()
-    system_prompt = "Write a quick piece of gossip talking about planets and stars as if they are high school drama characters. Use massive preppy slang. No intros."
-    try:
-        response = await google_client.aio.models.generate_content(
-            model="gemini-2.5-flash", contents="space tea",
-            config=types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=600)
-        )
-        embed = make_maggie_embed("🔮 THE ASTRAL TEA IS SPLASHING:", response.text)
-        if warning: embed.set_footer(text=warning)
-    except Exception: embed = make_maggie_embed("💀 error", "space is silent")
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="manifest", description="manifest your wildest desires into reality ✨")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def manifest_cmd(interaction: discord.Interaction, desire: str):
-    allowed, remaining, warning = check_allowance(interaction.user.id)
-    if not allowed:
-        await interaction.response.send_message(embed=make_maggie_embed("🚨 COGNITIVE RESET", "out of credits today bestie 💀"))
-        return
-        
-    await interaction.response.defer()
-    try:
-        res = await google_client.aio.models.generate_content(
-            model="gemini-2.5-flash", contents=desire,
-            config=types.GenerateContentConfig(system_instruction="Generate a hyper-preppy manifestation ritual. No filler intros.", max_output_tokens=600)
-        )
-        embed = make_maggie_embed("✨ MANIFESTATION MATRIX LOADED", res.text)
-        if warning: embed.set_footer(text=warning)
-    except Exception: embed = make_maggie_embed("💀 error", "universe busy")
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="horoscope", description="fabricated preppy prediction 🌟")
-@app_commands.choices(sign=[app_commands.Choice(name="Aries", value="aries"), app_commands.Choice(name="Taurus", value="taurus"), app_commands.Choice(name="Gemini", value="gemini"), app_commands.Choice(name="Cancer", value="cancer"), app_commands.Choice(name="Leo", value="leo"), app_commands.Choice(name="Virgo", value="virgo"), app_commands.Choice(name="Libra", value="libra"), app_commands.Choice(name="Scorpio", value="scorpio"), app_commands.Choice(name="Sagittarius", value="sagittarius"), app_commands.Choice(name="Capricorn", value="capricorn"), app_commands.Choice(name="Aquarius", value="aquarius"), app_commands.Choice(name="Pisces", value="pisces")])
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def horoscope_cmd(interaction: discord.Interaction, sign: app_commands.Choice[str]):
-    allowed, remaining, warning = check_allowance(interaction.user.id)
-    if not allowed:
-        await interaction.response.send_message(embed=make_maggie_embed("🚨 COGNITIVE RESET", "out of credits today bestie 💀"))
-        return
-        
-    await interaction.response.defer()
-    try:
-        res = await google_client.aio.models.generate_content(
-            model="gemini-2.5-flash", contents=sign.name,
-            config=types.GenerateContentConfig(system_instruction="Generate a preppy horoscope. No filler intros.", max_output_tokens=600)
-        )
-        embed = make_maggie_embed(f"🌟 {sign.name.upper()} HOROSCOPE 🔮", res.text)
-        if warning: embed.set_footer(text=warning)
-    except Exception: embed = make_maggie_embed("💀 error", "stars blocked")
-    await interaction.followup.send(embed=embed)
-
-# --- 📦 RANDOM / FREE STATIC CHANNELS (NOT DEDUCTED FROM BILL POOL) ---
-
-@bot.tree.command(name="coachella_lineup", description="generate a chaotic music festival poster featuring server members 🎪")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def coachella_cmd(interaction: discord.Interaction):
-    members = [m.display_name for m in interaction.guild.members] if interaction.guild else ["Bestie Clone A", "Matcha Monster", "Aura Void"]
-    head1 = random.choice(members)
-    head2 = random.choice(members)
-    reply = (
-        f"🔥 **MAIN HEADLINERS:**\n• **{head1}** (*'vibe check emergency'*)\n• **{head2}** (*notes-app apology set*)\n\n"
-        f"🎵 **SUB-STAGE ACTS:**\nProgressive Tax Evasion, Slowed+Reverb Astral Crying, Iced Chai Metalcore, and The Matcha Manifestation Project. 💅"
-    )
-    await interaction.response.send_message(embed=make_maggie_embed("🎪 COACHELLA: MAGICAL BESTIES EDITION 🎪", reply))
-
-@bot.tree.command(name="realign_chakras", description="force a passive-aggressive wellness check on someone 🧘")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def realign_cmd(interaction: discord.Interaction, user: discord.User):
-    reply = f"hey {user.mention}, your current outputs have been flagged as a total spiritual hazard. please take a deep breath, go order an expensive iced tea, and stop projecting your internal un-alignment onto the chat. 🔮💅"
-    await interaction.response.send_message(embed=make_maggie_embed("🧘 CHAKRA EMERGENCY DETECTION 🧘", reply))
 
 @bot.tree.command(name="vibecheck", description="run an advanced psychic check on someone 🔮")
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -472,29 +368,20 @@ async def vibecheck_cmd(interaction: discord.Interaction, user: discord.User = N
 async def aura_cmd(interaction: discord.Interaction, action: str, user: discord.User = None):
     t = user or interaction.user
     p = random.choice([+500, +1000, +50000, -200, -1500, -1000000])
-    emoji = "💅" if p > 0 else "💀"
-    await interaction.response.send_message(embed=make_maggie_embed("✨ AURA REPORT ✨", f"{t.mention} updated for: *\"{action}\"*\n\n**Result:** `{p:,}` points! {emoji}"))
+    await interaction.response.send_message(embed=make_maggie_embed("✨ AURA REPORT ✨", f"{t.mention} updated for: *\"{action}\"*\n\n**Result:** `{p:,}` points! {'💅' if p > 0 else '💀'}"))
 
 @bot.tree.command(name="slaydar", description="scan to see if someone is slaying 🔎")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def slaydar_cmd(interaction: discord.Interaction, user: discord.User = None):
     t = user or interaction.user
-    status = random.choice(['SLAYING 💅💖', 'A TOTAL FLOP 💀❌', 'BOBBY PIN ENERGY 🔮'])
-    await interaction.response.send_message(embed=make_maggie_embed("🔎 SLAY-DAR STATUS", f"scanned {t.mention}: **{status}**"))
-
-@bot.tree.command(name="crystals", description="pull a dynamic daily crystal reading 💎")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def crystals_cmd(interaction: discord.Interaction):
-    stones = ["Moldavite 🟢 (chaotic nuclear destruction incoming 💀)", "Rose Quartz 🌸 (immaculate matching energy 💅)", "Amethyst 🔮 (calm down, you're doing too much.)", "Clear Quartz ❄️ (vibe amplification active ✨)"]
-    await interaction.response.send_message(embed=make_maggie_embed("💎 COSMIC CRYSTAL MATRIX", f"your stone today is: **{random.choice(stones)}**"))
+    await interaction.response.send_message(embed=make_maggie_embed("🔎 SLAY-DAR STATUS", f"scanned {t.mention}: **{random.choice(['SLAYING 💅💖', 'A TOTAL FLOP 💀❌', 'BOBBY PIN ENERGY 🔮'])}**"))
 
 @bot.tree.command(name="potion", description="brew an exotic magic potion 🧪")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def potion_cmd(interaction: discord.Interaction):
-    potions = ["✨ **Iced Matcha Elixir** - grants `+1,500` aura points.", "💀 **Liquid Cancellation** - drops to `0` aura.", "🔮 **Starbucks Psychic Brew** - track your crush ☕"]
+    potions = ["✨ **Iced Matcha Elixir** - grants `+1,500` aura points.", "💀 **Liquid Cancellation** - drops to `0` aura."]
     await interaction.response.send_message(embed=make_maggie_embed("🔮 YOU BREWED A CONCOCTION", random.choice(potions)))
 
 @bot.tree.command(name="bestiematch", description="scan soul alignment 🔎")
@@ -509,7 +396,7 @@ async def bestiematch_cmd(interaction: discord.Interaction, bestie: discord.User
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def manifestation_circle_cmd(interaction: discord.Interaction, desire: str):
-    await interaction.response.send_message(embed=make_maggie_embed("🌀 VORTEX OPENED 🌀", f"{interaction.user.mention} is forcing: **\"{desire}\"** ✨\n\nREACT WITH ✨ OR 🔮 TO POWER IT!"))
+    await interaction.response.send_message(embed=make_maggie_embed("🌀 VORTEX OPENED 🌀", f"{interaction.user.mention} is forcing: **\"{desire}\"** ✨"))
 
 @bot.tree.command(name="hex", description="cast a minor curse 🪄")
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -529,7 +416,7 @@ async def tarot_cmd(interaction: discord.Interaction):
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def fortune_cmd(interaction: discord.Interaction):
-    fortunes = ["expensive iced drink incoming. 🍵✨", "legendary meme day. 💀", "immaculate vibes. 💖"]
+    fortunes = ["expensive iced drink incoming. 🍵✨", "legendary meme day. 💀"]
     await interaction.response.send_message(embed=make_maggie_embed("🌟 FORECASTING FUTURE MATRIX", random.choice(fortunes)))
 
 # --- 💬 INTERACTIVE CONTROLS & CHAT PASSIVES ---
@@ -538,35 +425,22 @@ async def fortune_cmd(interaction: discord.Interaction):
 async def on_message(message):
     if message.author == bot.user: return
     content = message.content.lower()
-    
     banned_list = load_banned_words()
     if any(word in content for word in banned_list):
-        # target block deleted to prevent physical message purging completely
-        embed = make_maggie_embed("🚨 OMG CANCELLED?! 🔮❌", f"{message.author.mention} did you actually just say that? my psychic crystals are shattering. BYE.")
-        await message.channel.send(embed=embed)
+        await message.channel.send(embed=make_maggie_embed("🚨 OMG CANCELLED?! 🔮❌", f"{message.author.mention} did you actually just say that? my psychic crystals are shattering. BYE."))
         return
-
     if message.content.isupper() and len(message.content) > 12:
         if random.random() < 0.4:
-            await message.channel.send(embed=make_maggie_embed("🗣️ FREQUENCY EMERGENCY 💀💅", "why are you screaming bestie? it's ruining the structural aesthetic of the chat. lower your frequency."))
+            await message.channel.send(embed=make_maggie_embed("🗣️ FREQUENCY EMERGENCY 💀💅", "why are you screaming bestie? lower your frequency."))
             return
-
     if "http" in content or "www." in content:
         if random.random() < 0.3:
             await message.channel.send(embed=make_maggie_embed("🔮 VIBE FILTER TRIGGERED ❌", "idk what this link is but the layout looks like an absolute flop from here."))
             return
-
     if "i hate this" in content or "this sucks" in content:
         if random.random() < 0.5: await message.channel.send(embed=make_maggie_embed("💅 vibe update", "omg stop being such a buzzkill, it's literally just a ✨vibe✨ issue, bestie."))
     elif "magic" in content or "manifest" in content:
         if random.random() < 0.4: await message.channel.send(embed=make_maggie_embed("🔮 manifestation trigger", "did someone say magic?! 🔮✨ manifest it queen!!"))
-    elif "school" in content or "exam" in content or "study" in content:
-        if random.random() < 0.5: await message.channel.send(embed=make_maggie_embed("✨ crystal ball check", "school is such a flop, come look into my crystal ball instead 🔮✨"))
-    elif "slay" in content:
-        if random.random() < 0.4: await message.channel.send(embed=make_maggie_embed("💖 identity log", "purr, absolute main character energy right there 💖💅"))
-    elif "broke" in content or "no money" in content:
-        if random.random() < 0.5: await message.channel.send(embed=make_maggie_embed("💀 timeline update", "gofundme era? manifesting a sugar daddy or a lottery win for you immediately 💀🔮"))
-
     await bot.process_commands(message)
 
 bot.run(os.getenv("DISCORD_TOKEN"))

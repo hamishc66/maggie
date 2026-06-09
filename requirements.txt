@@ -2,3 +2,4 @@ discord.py
 google-genai
 python-dotenv
 aiohttp
+Pillow
