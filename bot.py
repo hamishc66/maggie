@@ -118,7 +118,8 @@ class SlayConfirmationView(discord.ui.View):
         IMAGE_COOLDOWN[self.author.id] = datetime.now()
         final_prompt = f"A highly aesthetic, preppy, stylized pop-culture digital illustration. Theme: {self.prompt}. Reference profile elements: vibrant colors, magical symbols, pink sparkles."
         try:
-            response = google_client.models.generate_images(
+            # changed to asynchronous generation to prevent blocking the event loop
+            response = await google_client.aio.models.generate_images(
                 model='imagen-3.0-generate-002', prompt=final_prompt,
                 config=types.GenerateImagesConfig(number_of_images=1, output_mime_type="image/jpeg")
             )
@@ -172,7 +173,6 @@ async def update_cmd(interaction: discord.Interaction):
 
     await interaction.response.defer(ephemeral=True)
 
-    # load information block natively from localized patch sheet
     if os.path.exists("change.txt"):
         with open("change.txt", "r", encoding="utf-8") as f:
             changelog_content = f.read()
@@ -182,12 +182,12 @@ async def update_cmd(interaction: discord.Interaction):
     guild = interaction.guild
     server_owner = guild.owner or await bot.fetch_user(guild.owner_id)
     
-    # filter out bots and the server owner to get clean target accounts
-    potential_recipients = [m for m in guild.members if not m.bot and m.id != server_owner.id][^1]
+    # fixed: removed markdown formatting syntax artifacts [^1] and [^2]
+    potential_recipients = [m for m in guild.members if not m.bot and m.id != server_owner.id]
     
     recipients = [server_owner]
     if len(potential_recipients) >= 2:
-        recipients.extend(random.sample(potential_recipients, 2))[^2]
+        recipients.extend(random.sample(potential_recipients, 2))
     else:
         recipients.extend(potential_recipients)
 
@@ -240,6 +240,9 @@ async def slay_cert_cmd(interaction: discord.Interaction, target: discord.User =
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)
+    
+    # fixed: defined the missing embed variable using helper function
+    embed = make_maggie_embed("✨ CERTIFICATE MANIFESTED ✨", f"unveiling the official document for {user.mention}!")
     await interaction.followup.send(embed=embed, file=discord.File(buf, filename="slay_certificate.png"))
 
 @bot.tree.command(name="manifest_audio", description="bakes an unhinged preppy ai affirmation into a real tiktok voice audio file 🔊")
