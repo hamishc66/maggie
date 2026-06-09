@@ -20,7 +20,7 @@ google_client = genai.Client(api_key=api_key)
 def load_banned_words():
     if os.path.exists("bad.txt"):
         with open("bad.txt", "r", encoding="utf-8") as f:
-            return [line.strip().lower() for line in f if line.strip()][^1]
+            return [line.strip().lower() for line in f if line.strip()]
     return []
 
 class MagicalBot(commands.Bot):
@@ -47,7 +47,7 @@ async def on_guild_join(guild):
                 "all commands use modern slash interactions! 💅"
             ),
             color=discord.Color.from_rgb(255, 105, 180)
-        )[^2]
+        )
         embed.add_field(name="💅 drama & manipulation", value="`/cancel`, `/gaslight`, `/gatekeep`, `/girlboss`", inline=False)
         embed.add_field(name="🔮 unhinged magic", value="`/starbucks_order`, `/coachella_lineup`, `/spiritual_gossip`, `/realign_chakras`", inline=False)
         embed.add_field(name="🔮 essentials", value="`/ai`, `/ermactually`, `/vibecheck`, `/aura`, `/slaydar`, `/manifest`, `/crystals`, `/potion`, `/bestiematch`, `/manifestation_circle`, `/hex`, `/tarot`, `/fortune`, `/horoscope`", inline=False)
@@ -59,7 +59,7 @@ async def on_guild_join(guild):
 async def on_ready():
     print(f"💖 magical maggie's assistant is online as {bot.user}!")
 
-# --- 💅 NEW SOCIAL MANIPULATION & DRAMA COMMANDS ---
+# --- 💅 SOCIAL MANIPULATION & DRAMA COMMANDS ---
 
 @bot.tree.command(name="cancel", description="generate a massive public call-out thread or notes app apology 📉")
 @app_commands.describe(user="the bestie getting cancelled", reason="what is the drama about?")
@@ -120,7 +120,7 @@ async def girlboss_cmd(interaction: discord.Interaction):
     except Exception: reply = "the grind never stops but my system did 💀"
     await interaction.followup.send(content=f"💅 **DAILY ACCELERATION ROUTINE** 📈\n\n{reply}")
 
-# --- 🔮 NEW UNHINGED MAGIC & POP CULTURE COMMANDS ---
+# --- 🔮 UNHINGED MAGIC & POP CULTURE COMMANDS ---
 
 @bot.tree.command(name="starbucks_order", description="brew a chaotic 15-ingredient magical drink order ☕")
 async def starbucks_cmd(interaction: discord.Interaction):
@@ -178,7 +178,7 @@ async def realign_cmd(interaction: discord.Interaction, user: discord.Member):
         f"please take a deep breath, go order an expensive iced tea, and stop projecting your internal un-alignment onto the chat. counting to ten starts now! 🔮💅"
     )
 
-# --- 📦 REST OF FOUNDATIONAL COMMANDS RETAINED ---
+# --- CLOUD INTEL & CORE COMMANDS ---
 
 @bot.tree.command(name="ai", description="chat with the preppy magical assistant 💅")
 @app_commands.describe(prompt="what do you want to tell maggie?", tts="should maggie speak this out loud?")
@@ -319,7 +319,6 @@ async def on_message(message):
     if message.author == bot.user: return
     content = message.content.lower()
     
-    # 🚨 DYNAMIC BAD-WORD OBLITERATOR FROM TEXT FILE
     banned_list = load_banned_words()
     if any(word in content for word in banned_list):
         try: await message.delete()
@@ -327,7 +326,6 @@ async def on_message(message):
         await message.channel.send(f"🚨 **OMG CANCELLED?!** {message.author.mention} did you actually just say that? my psychic crystals are literally shattering from the toxic energy. reporting you to the higher astral plane immediately, BYE 🔮❌")
         return
 
-    # 🗣️ PASSIVE TRIGGERS & REACTION SYSTEM
     if message.content.isupper() and len(message.content) > 12:
         if random.random() < 0.4:
             await message.channel.send("why are you literally screaming bestie? it's hurting my third eye and completely ruining the structural aesthetic of the chat. lower your frequency. 💀💅")
