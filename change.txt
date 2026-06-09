@@ -1,6 +1,6 @@
-- added visual slay certificates 💅
-- upgraded client architecture to user apps 🚀
-- fixed wikipedia api connectivity errors 📖
-- REMOVED FILTER BECAUSE WE LOVE 
-- made it more preppy to slay the day
-- added gossip mode 🤭
+- NEW POTIONS
+- /CMD
+- OVER 300000000 NEW COMMANDS!!!!!!
+- HIGHER BALANCE
+- OPTION TO PAY 1 DOLLAR TO GET UNLIMITED BALLANCE
+- IAMGE GENERATOR WHICH BURNS OCEANS
